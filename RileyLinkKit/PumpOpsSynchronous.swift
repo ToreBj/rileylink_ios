@@ -11,6 +11,15 @@ import MinimedKit
 import RileyLinkBLEKit
 
 
+/// An error that occurs during a command run
+///
+/// - command: The error took place during the command sequence
+/// - arguments: The error took place during the argument sequence
+public enum PumpCommandError: Error {
+    case command(PumpCommsError)
+    case arguments(PumpCommsError)
+}
+
 public enum PumpCommsError: Error {
     case rfCommsFailure(String)
     case unknownPumpModel
@@ -47,7 +56,12 @@ class PumpOpsSynchronous {
     private func makePumpMessage(to messageType: MessageType, using body: MessageBody = CarelinkShortMessageBody()) -> PumpMessage {
         return PumpMessage(packetType: .carelink, address: pump.pumpID, messageType: messageType, messageBody: body)
     }
-    
+
+    /// - Throws:
+    ///   - PumpCommsError.rileyLinkTimeout
+    ///   - PumpCommsError.unknownResponse
+    ///   - PumpCommsError.noResponse
+    ///   - PumpCommsError.crosstalk
     private func sendAndListen(_ msg: PumpMessage, timeoutMS: UInt16 = standardPumpResponseWindow, repeatCount: UInt8 = 0, msBetweenPackets: UInt8 = 0, retryCount: UInt8 = 3) throws -> PumpMessage {
         let cmd = SendAndListenCmd()
         cmd.packet = RFPacket(data: msg.txData)
@@ -92,13 +106,17 @@ class PumpOpsSynchronous {
         
         return message
     }
-    
-    /**
-     Attempts to send initial short wakeup message that kicks off the wakeup process.
 
-     If successful, still does not fully wake up the pump - only alerts it such that the
-     longer wakeup message can be sent next.
-     */
+    /// Attempts to send initial short wakeup message that kicks off the wakeup process.
+    ///
+    /// If successful, still does not fully wake up the pump - only alerts it such that the longer wakeup message can be sent next.
+    ///
+    /// - Throws:
+    ///   - PumpCommsError.rileyLinkTimeout
+    ///   - PumpCommsError.unknownResponse
+    ///   - PumpCommsError.noResponse
+    ///   - PumpCommsError.crosstalk
+    ///   - PumpCommsError.unexpectedResponse
     private func sendWakeUpBurst() throws {
         var lastError: Error?
         
@@ -149,9 +167,13 @@ class PumpOpsSynchronous {
         }
         return false
     }
-    
 
-
+    /// - Throws:
+    ///   - PumpCommsError.rileyLinkTimeout
+    ///   - PumpCommsError.unknownResponse
+    ///   - PumpCommsError.noResponse
+    ///   - PumpCommsError.crosstalk
+    ///   - PumpCommsError.unexpectedResponse
     private func wakeup(_ duration: TimeInterval = TimeInterval(minutes: 1)) throws {
         guard !pump.isAwake else {
             return
@@ -177,31 +199,50 @@ class PumpOpsSynchronous {
         NSLog("Power on for %.0f minutes", duration.minutes)
         pump.awakeUntil = Date(timeIntervalSinceNow: duration)
     }
-    
+
+    /// - Throws: `PumpCommandError` specifying the failure sequence
     internal func runCommandWithArguments(_ msg: PumpMessage, responseMessageType: MessageType = .pumpAck) throws -> PumpMessage {
-        try wakeup()
+        do {
+            try wakeup()
         
-        let shortMsg = makePumpMessage(to: msg.messageType)
-        let shortResponse = try sendAndListen(shortMsg)
+            let shortMsg = makePumpMessage(to: msg.messageType)
+            let shortResponse = try sendAndListen(shortMsg)
         
-        guard shortResponse.messageType == .pumpAck else {
-            throw PumpCommsError.unexpectedResponse(shortResponse, from: shortMsg)
+            guard shortResponse.messageType == .pumpAck else {
+                throw PumpCommsError.unexpectedResponse(shortResponse, from: shortMsg)
+            }
+        } catch let error {
+            throw PumpCommandError.command(error as! PumpCommsError)
         }
+
+        do {
+            let response = try sendAndListen(msg)
         
-        let response = try sendAndListen(msg)
-        
-        guard response.messageType == responseMessageType else {
-            throw PumpCommsError.unexpectedResponse(response, from: msg)
+            guard response.messageType == responseMessageType else {
+                throw PumpCommsError.unexpectedResponse(response, from: msg)
+            }
+
+            return response
+        } catch let error {
+            throw PumpCommandError.arguments(error as! PumpCommsError)
         }
-        
-        return response
     }
-    
+
+    /// - Throws:
+    ///   - PumpCommsError.rileyLinkTimeout
+    ///   - PumpCommsError.unknownResponse
+    ///   - PumpCommsError.noResponse
+    ///   - PumpCommsError.crosstalk
+    ///   - PumpCommsError.unexpectedResponse
     internal func getPumpModelNumber() throws -> String {
         let body: GetPumpModelCarelinkMessageBody = try messageBody(to: .getPumpModel)
         return body.model
     }
-    
+
+    /// Retrieves the pump model from either the state or from the 
+    ///
+    /// - Returns: The pump model
+    /// - Throws: `PumpCommsError`
     internal func getPumpModel() throws -> PumpModel {
         if let pumpModel = pump.pumpModel {
             return pumpModel
@@ -215,7 +256,13 @@ class PumpOpsSynchronous {
         
         return pumpModel
     }
-    
+
+    /// - Throws:
+    ///   - PumpCommsError.rileyLinkTimeout
+    ///   - PumpCommsError.unknownResponse
+    ///   - PumpCommsError.noResponse
+    ///   - PumpCommsError.crosstalk
+    ///   - PumpCommsError.unexpectedResponse
     internal func messageBody<T: MessageBody>(to messageType: MessageType) throws -> T {
         try wakeup()
         
